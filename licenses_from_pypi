@@ -1,0 +1,79 @@
+#!/usr/bin/python
+
+from __future__ import absolute_import
+from __future__ import unicode_literals
+
+import collections
+import functools
+import json
+import sys
+import tempfile
+
+from pip.req import parse_requirements
+
+import tornado.gen
+import tornado.ioloop
+import tornado.httpclient
+
+
+@tornado.gen.coroutine
+def fetch_license(package_name, package_version):
+    client = tornado.httpclient.AsyncHTTPClient()
+    if package_version:
+        url = "https://pypi.python.org/pypi/%s/%s/json" % (package_name, package_version)
+    else:
+        url = "https://pypi.python.org/pypi/%s/json" % (package_name, )
+    request = tornado.httpclient.HTTPRequest(url=url)
+    try:
+        response = yield client.fetch(request)
+    except tornado.httpclient.HTTPError:
+        raise tornado.gen.Return('Not in PyPI')
+    pypi_info = json.load(response.buffer)['info']
+    license = 'UNKNOWN'
+    if pypi_info.get('license', 'UNKNOWN') != 'UNKNOWN' and len(pypi_info.get('license', 'UNKNOWN').split('\n')) == 1:
+        license = pypi_info['license']
+    else:
+        for classifier in pypi_info['classifiers']:
+            if classifier.startswith('License'):
+                license = classifier.split('::')[-1].strip()
+    sys.stdout.write('.')
+    sys.stdout.flush()
+    raise tornado.gen.Return(license)
+
+
+@tornado.gen.coroutine
+def fetch_licenses(package_list):
+    packages = {}
+    for package_name, package_version in package_list:
+        license = yield fetch_license(package_name, package_version)
+        packages[package_name] = license
+    print ""
+    raise tornado.gen.Return(packages)
+
+
+def main():
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(sys.stdin.read())
+        f.flush()
+        ReqOpts = collections.namedtuple('ReqOpts', ['skip_requirements_regex', 'default_vcs'])
+        opts = ReqOpts(None, 'git')
+        packages = []
+        for ir in parse_requirements(f.name, options=opts):
+            package_name = ir.name
+            package_version = None
+            if not package_name:
+                continue
+            if ir.req:
+                if ir.req.specs:
+                    package_version = ir.req.specs[0][1]
+                else:
+                    package_version = None
+            packages.append((package_name, package_version))
+        fetch_these_licenses = functools.partial(fetch_licenses, packages)
+        p2l = tornado.ioloop.IOLoop().current().run_sync(fetch_these_licenses)
+        for package, license in sorted(p2l.items()):
+            print "%s,%s" % (package, license)
+
+
+if __name__ == '__main__':
+    main()
